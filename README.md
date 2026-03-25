@@ -71,7 +71,7 @@ parameter tensor where $N$ = `block_size`. This **is** the adjacency matrix of t
 network graph.
 
 - $\log\alpha_{tj}$ is the logit for the Hard Concrete gate on edge $(j \to t)$
-- The gate matrix $Z = \text{hard\_concrete}(\log\alpha)$ has entries in $[0, 1]$
+- The gate matrix $Z = \text{hard}_\text{concrete}(\log\alpha)$ has entries in $[0, 1]$
 - A causal mask enforces $Z_{tj} = 0$ for $j \geq t$
 
 ### Edge types
@@ -92,7 +92,7 @@ attention pattern directly — bright = active edge, dark = pruned.
 ## L0 regularisation and the Hard Concrete distribution
 
 Discrete graph structure (edge present / absent) is incompatible with gradient descent.
-The solution: treat the parameter space as **infinite but sparse**. Every potential edge
+We treat the parameter space as **infinite but sparse**. Every potential edge
 always exists, but most are clamped near zero by a learned gate.
 
 The **Hard Concrete distribution** (Louizos et al., 2018) provides a continuous
@@ -100,9 +100,9 @@ relaxation of Bernoulli that places actual probability mass at exactly 0 and 1:
 
 $$u \sim \text{Uniform}(0,\, 1)$$
 
-$$s = \sigma\!\left(\frac{\log u - \log(1-u) + \log\alpha}{\beta}\right)$$
+$$s = \sigma\left(\frac{\log u - \log(1-u) + \log\alpha}{\beta}\right)$$
 
-$$z = \text{clamp}\!\left(s\,(\zeta - \gamma) + \gamma,\; 0,\; 1\right)$$
+$$z = \text{clamp}\left(s\,(\zeta - \gamma) + \gamma,\; 0,\; 1\right)$$
 
 During training, `z` is sampled stochastically; at eval, `z = sigmoid(log_alpha)`.
 Because the stretched distribution has mass at exactly 0, the expected number of active

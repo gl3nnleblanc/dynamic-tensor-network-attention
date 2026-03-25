@@ -146,7 +146,7 @@ def load_paragraphs(path, min_len=40):
             current.append(line)
         elif current:
             para = ' '.join(current)
-            if len(para) >= min_len:
+            if len(para) >= min_len and 'ILLUSTRATION' not in para.upper():
                 paragraphs.append(para)
             current = []
     if current:
