@@ -34,9 +34,7 @@ composition of such contractions.
 
 Standard multi-head attention computes, for each output position `t`:
 
-```
-output_t = sum_j  softmax(q_t · k_j / sqrt(d)) * v_j
-```
+$$\text{output}_t = \sum_j \text{softmax}\!\left(\frac{q_t \cdot k_j}{\sqrt{d}}\right) v_j$$
 
 This is O(n²) in sequence length and uses a fixed, dense attention pattern.
 
@@ -44,11 +42,9 @@ Here, attention is replaced by a tensor network over sequence positions. For eac
 position `t`, the model contracts a shared bond tensor `W` with the bond-space embeddings
 of position `j` (source) and position `t` (query):
 
-```
-c_jt[k] = sum_{a,b}  W[a, b, k] * h_j[a] * h_t[b]
+$$c_{jt}[k] = \sum_{a,b} W[a,\, b,\, k]\; h_j[a]\; h_t[b]$$
 
-output_t = output_proj( sum_j  Z[t,j] * c_jt )
-```
+$$\text{output}_t = \text{output\_proj}\!\left(\sum_j Z[t,j]\; c_{jt}\right)$$
 
 where:
 - `h_t = A[t].T @ x_t` — each position's embedding projected into bond space (dim `D`)
@@ -94,11 +90,11 @@ always exists, but most are clamped near zero by a learned gate.
 The **Hard Concrete distribution** (Louizos et al., 2018) provides a continuous
 relaxation of Bernoulli that places actual probability mass at exactly 0 and 1:
 
-```
-u ~ Uniform(0, 1)
-s = sigmoid((log u - log(1-u) + log_alpha) / beta)
-z = clamp(s * (zeta - gamma) + gamma,  0,  1)
-```
+$$u \sim \text{Uniform}(0,\, 1)$$
+
+$$s = \sigma\!\left(\frac{\log u - \log(1-u) + \log\alpha}{\beta}\right)$$
+
+$$z = \text{clamp}\!\left(s\,(\zeta - \gamma) + \gamma,\; 0,\; 1\right)$$
 
 During training, `z` is sampled stochastically; at eval, `z = sigmoid(log_alpha)`.
 Because the stretched distribution has mass at exactly 0, the expected number of active
