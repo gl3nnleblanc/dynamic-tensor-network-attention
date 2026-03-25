@@ -318,6 +318,45 @@ def sample(n_samples=3, max_len=120, temperature=0.7):
     return results
 
 
+TIMELAPSE_DIR = os.path.expanduser('~/Desktop/timelapse')
+os.makedirs(TIMELAPSE_DIR, exist_ok=True)
+
+def save_timelapse_frame(gate_mat, level, step, task_loss, l0, n_active, samples):
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.gridspec as gridspec
+
+        fig = plt.figure(figsize=(10, 7), facecolor='#1a1a2e')
+        gs  = gridspec.GridSpec(2, 1, height_ratios=[4, 1], hspace=0.35)
+
+        ax_mat = fig.add_subplot(gs[0])
+        ax_mat.imshow(gate_mat.numpy(), vmin=0, vmax=1, cmap='viridis', origin='upper', aspect='auto')
+        ax_mat.set_title(
+            f'[{level}] step {step} | loss {task_loss:.4f} | l0 {l0:.4f} | active edges {n_active}',
+            color='white', fontsize=9, pad=6
+        )
+        ax_mat.set_xlabel('source position j', color='#aaaaaa', fontsize=8)
+        ax_mat.set_ylabel('target position t', color='#aaaaaa', fontsize=8)
+        ax_mat.tick_params(colors='#aaaaaa', labelsize=7)
+        for spine in ax_mat.spines.values():
+            spine.set_edgecolor('#444444')
+
+        ax_txt = fig.add_subplot(gs[1])
+        ax_txt.axis('off')
+        text = '\n'.join(f'[{i+1}] {s}' for i, s in enumerate(samples))
+        ax_txt.text(0.01, 0.95, text, transform=ax_txt.transAxes,
+                    color='#ccffcc', fontsize=7.5, fontfamily='monospace',
+                    verticalalignment='top', wrap=True)
+
+        path = os.path.join(TIMELAPSE_DIR, f'step_{step:06d}.png')
+        plt.savefig(path, dpi=120, bbox_inches='tight', facecolor=fig.get_facecolor())
+        plt.close(fig)
+    except ImportError:
+        pass
+
+
 def render(gate_mat, level, step, total, task_loss, l0, n_active, mean_la, max_la, samples):
     """
     Render the NxN gate matrix as a live ANSI truecolor display.
@@ -360,6 +399,7 @@ def render(gate_mat, level, step, total, task_loss, l0, n_active, mean_la, max_l
 # Total step count for LR decay: sum of all level pool sizes * passes_per_level
 passes_per_level = num_epochs
 total_steps = sum(len(v) for v in level_docs.values()) * passes_per_level
+print(f"total training steps: {total_steps}  (capture every {max(1, total_steps // 14900)} steps to stay under 1GB)")
 step = 0
 
 def train_on_pool(pool, level, passes=1):
@@ -411,6 +451,10 @@ def train_on_pool(pool, level, passes=1):
             samples  = sample()
             render(gate_mat, level, step, total_steps,
                    task_loss.item(), model.l0_loss().item(), n_active, mean_la, max_la, samples)
+
+            if step % max(1, total_steps // 14900) == 0:
+                save_timelapse_frame(gate_mat, level, step,
+                                     task_loss.item(), model.l0_loss().item(), n_active, samples)
 
 
 model.train()
