@@ -1,7 +1,7 @@
 # Dynamic Tensor Network Attention
 
 A character-level language model that replaces the transformer's multi-head attention
-mechanism with an **L0-gated tensor network** whose graph structure is learned during
+mechanism with an **L0-gated tensor network** whose "graph structure" is learned during
 training.
 
 Based on Karpathy's minimal GPT
