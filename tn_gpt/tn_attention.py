@@ -1,72 +1,121 @@
 """
-L0-gated tensor network attention module.
+MPS Tensor Network Attention.
 
-Replaces multi-head self-attention in the transformer block. Instead of
-computing QKV projections and a softmax attention matrix, this module:
+Replaces multi-head self-attention with a Matrix Product State (MPS) acting as a
+linear recurrence over the sequence.
 
-  1. Projects each input token embedding to bond dimension D.
-  2. Stores projected embeddings in a per-sequence hidden_cache.
-  3. For the current position, aggregates information from all causally
-     connected prior positions via 1-hop message passing:
+Nodes  = site tensors A[t], one per sequence position, shape (D, n_embd, D)
+Edges  = contracted bond indices between site tensors
 
-       out = h_pos + sum_{j <= pos, active(j,pos)}  z_j_pos * W_j_pos @ h_j
+Chain bonds (t-1 <-> t) are always active — implicit in the recurrence.
+Long-range bonds (i <-> j, i < j-1) are L0-gated via log_alpha.
 
-  4. Projects aggregated output back to n_embd.
+Forward pass:
+    M_t[l,r] = sum_s  A[t][l,s,r] * x_t[s]          contract physical leg with input
+    v_t      = v_{t-1} @ M_t                          chain contraction (always on)
+             + sum_{i<t-1} z_it * (v_i @ B[i,t])     long-range contributions
+    y_t      = output_proj(v_t)
 
-The graph topology (which edges exist) grows dynamically as new sequence
-positions are encountered. Gates z_j_pos are learned via Hard Concrete and
-an L0 regularization term in the training loss.
-
-hidden_cache is passed in and mutated in-place, analogous to Karpathy's
-keys/values lists. Clear it between documents.
+log_alpha[i,j] is THE adjacency matrix for long-range edges only.
+It is a real (N,N) parameter tensor — not a dict, not indexed by attention roles.
 """
 
+import math
 import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .adjacency import GrowableAdjacency
+from .l0_gate import hard_concrete_sample, expected_l0
 
 
 class TNAttention(nn.Module):
-    def __init__(self, n_embd: int, bond_dim: int):
+    def __init__(self, n_embd: int, bond_dim: int, block_size: int):
         super().__init__()
-        self.n_embd      = n_embd
-        self.bond_dim    = bond_dim
-        self.input_proj  = nn.Linear(n_embd, bond_dim, bias=False)
-        self.output_proj = nn.Linear(bond_dim, n_embd, bias=False)
-        self.adjacency   = GrowableAdjacency(bond_dim)
+        self.n_embd     = n_embd
+        self.bond_dim   = bond_dim
+        self.block_size = block_size
+        N, D = block_size, bond_dim
 
-    def forward(self, x: Tensor, pos: int, hidden_cache: list) -> Tensor:
+        # Site tensors: A[t] has shape (D, n_embd, D).
+        # M_t = I_D + einsum(A[t], x[t]) — residual parameterization.
+        # With A small at init, M_t ≈ I so sv(M_t) ≈ 1 and the recurrence is stable.
+        # The model learns perturbations away from identity.
+        self.A = nn.Parameter(torch.randn(N, D, n_embd, D) * 0.01)
+
+        # Long-range bond matrices: B[i,j] has shape (D, D)
+        # Contracts v_i (right bond of site i) with the state update at site j.
+        # Only meaningful for i < j-1.
+        self.B = nn.Parameter(torch.randn(N, N, D, D) * 0.1)
+
+        # THE adjacency matrix. log_alpha[i,j] = logit for long-range bond (i->j).
+        # Chain bonds are NOT here — they are always on via the recurrence.
+        # Initialize to 0: P(z>0) ≈ 83%, gates mostly open so gradients flow freely.
+        # L0 penalty will prune edges that don't help; task gradient keeps useful ones.
+        self.log_alpha = nn.Parameter(torch.full((N, N), 0.0))
+
+        # Learned left boundary state (initial v before position 0)
+        self.v0 = nn.Parameter(torch.randn(D) * (1.0 / math.sqrt(D)))
+
+        self.output_proj = nn.Linear(D, n_embd, bias=False)
+
+    def forward(self, x: Tensor) -> Tensor:
         """
-        Args:
-            x:            (n_embd,)  token embedding at current position (post-rmsnorm)
-            pos:          int        current position index (0-based)
-            hidden_cache: list       projected bond-dim embeddings from positions 0..pos-1
-                                     mutated in-place: h for current pos is appended
-
-        Returns:
-            (n_embd,) output embedding
+        x: (T, n_embd) — full sequence of input embeddings
+        returns: (T, n_embd) — output embeddings
         """
-        self.adjacency.ensure_nodes(pos + 1)
+        T = x.shape[0]
+        N, D = self.block_size, self.bond_dim
 
-        h = self.input_proj(x)          # (D,)
-        hidden_cache.append(h)          # store for future positions to attend to
+        # --- Step 1: build transfer matrices M_t = I + einsum(A[t], x[t]) ---
+        # Residual parameterization keeps sv(M_t) ≈ 1 at init and throughout training.
+        I_D = torch.eye(D, device=x.device)
+        M = I_D + torch.einsum('tlpr,tp->tlr', self.A[:T], x)   # (T, D, D)
 
-        # 1-hop message passing over active causal edges
-        out = h.clone()
-        for j, edge in self.adjacency.active_edges_to(pos):
-            z = edge.gate()             # Hard Concrete scalar in [0, 1]
-            if z.item() > 0.0:
-                out = out + z * (edge.W @ hidden_cache[j])
+        # --- Step 2: sample gate matrix for long-range edges ---
+        if self.training:
+            Z = hard_concrete_sample(self.log_alpha[:T, :T])  # (T, T)
+        else:
+            Z = torch.sigmoid(self.log_alpha[:T, :T])          # (T, T)
 
-        return self.output_proj(out)    # (n_embd,)
+        # --- Step 3: left-to-right MPS recurrence ---
+        v_states = []
+        v = self.v0   # (D,) left boundary state
 
-    def expected_L0(self) -> Tensor:
-        return self.adjacency.expected_L0()
+        for t in range(T):
+            # Chain: contract right bond of v_{t-1} with left bond of M_t
+            v_t = v @ M[t]                                     # (D,)@(D,D) -> (D,)
+
+            # Long-range: i < t-1 only (i = t-1 is the chain, already handled)
+            for i in range(t - 1):
+                z = Z[i, t]
+                if z.item() > 0.0:
+                    v_t = v_t + z * (v_states[i] @ self.B[i, t])  # (D,)
+
+            v_t = torch.tanh(v_t)
+            v_states.append(v_t)
+            v = v_t
+
+        # --- Step 4: project bond states to output embeddings ---
+        v_stack = torch.stack(v_states)          # (T, D)
+        return self.output_proj(v_stack)          # (T, n_embd)
+
+    def l0_loss(self) -> Tensor:
+        """Expected *fraction* of active long-range bonds (chain excluded), in [0, 1].
+        Normalised by number of potential edges so lambda_l0 is scale-invariant."""
+        mask = torch.ones(self.block_size, self.block_size,
+                          device=self.log_alpha.device).tril(diagonal=-2)
+        n_potential = mask.sum()
+        return (expected_l0(self.log_alpha) * mask).sum() / n_potential
+
+    def gate_matrix(self) -> Tensor:
+        """Adjacency matrix as gate probabilities. Shape (N, N). For visualization."""
+        return torch.sigmoid(self.log_alpha).detach().cpu()
+
+    def active_edge_count(self) -> int:
+        mask = torch.ones(self.block_size, self.block_size).tril(diagonal=-2)
+        return int((expected_l0(self.log_alpha.cpu()) * mask > 0.5).sum().item())
 
     def __repr__(self) -> str:
-        return (
-            f"TNAttention(n_embd={self.n_embd}, bond_dim={self.bond_dim}, "
-            f"adjacency={self.adjacency})"
-        )
+        return (f"TNAttention(n_embd={self.n_embd}, bond_dim={self.bond_dim}, "
+                f"block_size={self.block_size}, "
+                f"active_long_range_edges={self.active_edge_count()})")
