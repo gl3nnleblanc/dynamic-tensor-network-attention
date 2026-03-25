@@ -29,6 +29,9 @@ torch.manual_seed(42)
 # arXiv physics is streamed separately at the end via HuggingFace datasets.
 # ---------------------------------------------------------------------------
 
+DATA_DIR = 'data'
+os.makedirs(DATA_DIR, exist_ok=True)
+
 CURRICULUM = {
     'preschool': [
         # McGuffey First Eclectic Reader — "The cat is fat. Is the cat fat?"
@@ -185,16 +188,17 @@ for level, sources in CURRICULUM.items():
     # Early readers use shorter min_len since sentences are intentionally brief
     min_len = 20 if level == 'preschool' else 40 if level == 'grades_1_3' else 80
     for fname, url in sources:
-        if not os.path.exists(fname):
+        fpath = os.path.join(DATA_DIR, fname)
+        if not os.path.exists(fpath):
             print(f"downloading {fname} ...")
             try:
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req) as resp, open(fname, 'wb') as f:
+                with urllib.request.urlopen(req) as resp, open(fpath, 'wb') as f:
                     f.write(resp.read())
             except Exception as e:
                 print(f"  WARNING: skipping {fname} ({e})")
                 continue
-        pool.extend(load_paragraphs(fname, min_len=min_len))
+        pool.extend(load_paragraphs(fpath, min_len=min_len))
     level_docs[level] = pool
     print(f"  {level}: {len(pool)} paragraphs")
 

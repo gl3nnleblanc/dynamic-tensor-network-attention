@@ -129,21 +129,24 @@ forces.
 
 ## Training data
 
-Downloaded automatically on first run from Project Gutenberg:
+The model is trained on a **human-style reading curriculum** — the same progression a
+student might follow from learning to read through graduate school. Each stage accumulates
+all prior stages into the training pool, so the model never catastrophically forgets
+earlier material.
 
-| File | Source |
-|------|--------|
-| Shakespeare complete works | PG #100 |
-| War and Peace | PG #2600 |
-| Mark Twain collected works | PG #3200 |
-| Don Quixote | PG #996 |
-| Bible (KJV) | PG #10 |
-| Moby Dick | PG #2701 |
-| Les Misérables | PG #135 |
+All texts are downloaded automatically on first run (mostly from Project Gutenberg) and
+split into paragraphs. The final stage streams physics abstracts from the HuggingFace
+`scientific_papers` dataset.
 
-Files are split into paragraphs and trained with a curriculum (see below). All prior
-curriculum stages are pooled into each subsequent stage so the model doesn't
-catastrophically forget earlier material.
+| Stage | Content |
+|-------|---------|
+| **Preschool** | McGuffey First Eclectic Reader |
+| **Grades 1–3** | Bible (KJV), McGuffey readers 2–3, Aesop's Fables, Grimm's Fairy Tales, Wind in the Willows, Ray's Primary & Intellectual Arithmetic |
+| **Grades 4–6** | Alice in Wonderland, Wizard of Oz, Jungle Book, Peter Pan, Robin Hood, McGuffey readers 4–5, Ray's Practical Arithmetic |
+| **Grades 7–9** | Tom Sawyer, Huckleberry Finn, Treasure Island, Sherlock Holmes, Frankenstein, Dracula, Jekyll & Hyde, The Time Machine, Ray's Algebra |
+| **Grades 10–12** | Shakespeare (complete), Great Expectations, Pride and Prejudice, Tale of Two Cities, Paradise Lost, Canterbury Tales, projective geometry |
+| **College** | Moby Dick, Ulysses, War and Peace, Brothers Karamazov, Les Misérables, Origin of Species, Wealth of Nations, The Republic, Calculus Made Easy |
+| **arXiv physics** | ~50k abstracts from hep-th, hep-ph, gr-qc, quant-ph, cond-mat, astro-ph |
 
 ---
 
