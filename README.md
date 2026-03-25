@@ -21,12 +21,13 @@ A tensor network is a graph where:
 
 When two nodes share an edge of dimension `D`, you sum over that index during the forward
 pass. Adding an edge means adding a new dimension of size `D` to both tensors and
-contracting over it at inference time. The **bond dimension** `D` controls how much
-information can flow across an edge.
+contracting over it at inference time.
 
 This is a strict generalisation of matrix multiplication: a single edge between two
 rank-1 tensors with bond dimension `D` is just a dot product; the full network is a
 composition of such contractions.
+
+The **bond dimension** `D` controls how much information can flow across an edge by limiting the maximum [entanglement entropy](https://en.wikipedia.org/wiki/Entropy_of_entanglement) between tensors.
 
 ---
 
@@ -34,47 +35,54 @@ composition of such contractions.
 
 Standard multi-head attention computes, for each output position `t`:
 
-$$\text{output}_t = \sum_j \text{softmax}\!\left(\frac{q_t \cdot k_j}{\sqrt{d}}\right) v_j$$
+$$\text{output}^t = \sum_j \text{softmax}\left(\frac{q^t \cdot k^j}{\sqrt{d}}\right) v^j$$
 
-This is O(n²) in sequence length and uses a fixed, dense attention pattern.
+This is $\mathcal{O}(n^2)$ in sequence length and uses a fixed, dense attention pattern.
 
-Here, attention is replaced by a tensor network over sequence positions. For each output
-position `t`, the model contracts a shared bond tensor `W` with the bond-space embeddings
-of position `j` (source) and position `t` (query):
+Here, attention is replaced by a **Matrix Product State (MPS) recurrence** over the
+sequence. Each position $t$ has a site tensor $A^t \in \mathbb{R}^{D \times n_{\text{embd}} \times D}$
+that is contracted with the token embedding $x^t$ to produce a transfer matrix:
 
-$$c_{jt}[k] = \sum_{a,b} W[a,\, b,\, k]\; h_j[a]\; h_t[b]$$
+$$M^t = I_D + \sum_s A^t_{lsr}\ x^t_s \qquad (M^t \in \mathbb{R}^{D \times D})$$
 
-$$\text{output}_t = \text{output\_proj}\!\left(\sum_j Z[t,j]\; c_{jt}\right)$$
+The residual " $I_D +$ " keeps singular values of $M^t$ near 1 at initialisation so the
+recurrence is stable from step 0.
+
+A bond state $v \in \mathbb{R}^D$ is propagated left-to-right through the sequence.
+At each position, the nearest-neighbour (chain) bond is always applied; long-range bonds
+from any earlier position $i < t-1$ are gated by the learned adjacency matrix:
+
+$$v^t = \tanh\left(v^{t-1} M^t\ +\ \sum_{i=0}^{t-2} Z_{it}\ \bigl(v^i\, B^{it}\bigr)\right)$$
+
+$$\text{output}^t = W_{\text{out}}\ v^t$$
 
 where:
-- `h_t = A[t].T @ x_t` — each position's embedding projected into bond space (dim `D`)
-- `W ∈ R^{D × D × D}` — the shared bond tensor; indices are (source, query, output)
-- `Z[t,j]` — the gate value for edge `(j → t)`, drawn from the learned adjacency matrix
-- One free leg `k` remains after the contraction, giving a `D`-dimensional output per edge
-
-Contractions are performed using [google/TensorNetwork](https://github.com/google/TensorNetwork).
+- $v^0 = v_0$ — a learned left boundary state (dim $D$), initialized as $\mathcal{N}(0,\, 1/D)$ and updated by the optimizer
+- $B^{it} \in \mathbb{R}^{D \times D}$ — long-range bond matrix for edge $(i \to t)$
+- $Z_{it}$ — the Hard Concrete gate for edge $(i \to t)$, from the adjacency matrix
+- $W_{\text{out}} \in \mathbb{R}^{D \times n_{\text{embd}}}$ — projects the bond state back to embedding space
 
 ---
 
 ## The adjacency matrix
 
-The attention pattern is governed by `log_alpha ∈ R^{N × N}`, a learnable parameter
-tensor where `N = block_size`. This **is** the adjacency matrix of the tensor network
-graph.
+The attention pattern is governed by $\log\alpha \in \mathbb{R}^{N \times N}$, a learnable
+parameter tensor where $N$ = `block_size`. This **is** the adjacency matrix of the tensor
+network graph.
 
-- `log_alpha[t, j]` is the logit for the Hard Concrete gate on edge `(j → t)`
-- The gate matrix `Z = hard_concrete(log_alpha)` has entries in `[0, 1]`
-- A causal mask enforces `Z[t, j] = 0` for `j > t`
+- $\log\alpha_{tj}$ is the logit for the Hard Concrete gate on edge $(j \to t)$
+- The gate matrix $Z = \text{hard\_concrete}(\log\alpha)$ has entries in $[0, 1]$
+- A causal mask enforces $Z_{tj} = 0$ for $j \geq t$
 
 ### Edge types
 
-**Chain edges** (`j == t-1`): nearest-neighbour connections, always active, excluded from
-regularisation. These form the base MPS-style attention — a linear chain over the sequence.
+**Chain edges** ($j = t-1$): nearest-neighbour connections, always active, excluded from
+regularisation. These form the base MPS-style recurrence — a linear chain over the sequence.
 
-**Long-range edges** (`j < t-1`): pre-seeded at initialisation with a small negative
-logit. These are the edges the model can grow or prune. L0 regularisation penalises
-their expected activation count, driving the graph toward a sparse skeleton of only the
-long-range dependencies that are genuinely useful.
+**Long-range edges** ($j < t-1$): initialized with $\log\alpha_{tj} = 0$, giving
+$P(z_{tj} > 0) \approx 83\%$ so gradients flow freely from the start. L0 regularisation
+penalises their expected activation count, driving the graph toward a sparse skeleton of
+only the long-range dependencies that are genuinely useful.
 
 After training, `plt.imshow(model.blocks[0].attn.gate_matrix())` shows the learned
 attention pattern directly — bright = active edge, dark = pruned.
@@ -107,37 +115,15 @@ forces.
 
 ---
 
-## Architecture
-
-```
-Input tokens
-    │
-    ▼
-wte (Embedding)  +  wpe (Embedding)
-    │
-    ▼  ─────────────────────────────────── x n_layer
-┌─────────────────────────────────────┐
-│  RMSNorm                            │
-│      │                              │
-│  TNAttention  ──────────────────────┤  (residual)
-│      │                              │
-│  RMSNorm                            │
-│      │                              │
-│  MLP (Linear → ReLU → Linear) ──────┤  (residual)
-└─────────────────────────────────────┘
-    │
-    ▼
-lm_head (Linear → logits over vocab)
-```
-
 ### TNAttention internals
 
-| Parameter    | Shape                  | Role                                          |
-|--------------|------------------------|-----------------------------------------------|
-| `log_alpha`  | `(N, N)`               | Adjacency matrix logits                       |
-| `A`          | `(N, n_embd, D)`       | Per-position site projections to bond space   |
-| `W`          | `(D, D, D)`            | Shared bond tensor                            |
-| `output_proj`| `(D, n_embd)`          | Projects bond output back to embedding space  |
+| Parameter    | Shape                  | Role                                                        |
+|--------------|------------------------|-------------------------------------------------------------|
+| `log_alpha`  | `(N, N)`               | Adjacency matrix logits for long-range gates                |
+| `A`          | `(N, D, n_embd, D)`    | Site tensors — contracted with $x^t$ to form transfer matrix $M^t$ |
+| `B`          | `(N, N, D, D)`         | Long-range bond matrices $B^{it}$                           |
+| `v0`         | `(D,)`                 | Learned left boundary state                                 |
+| `output_proj`| `(D, n_embd)`          | Projects bond state $v^t$ back to embedding space           |
 
 ---
 
@@ -155,7 +141,9 @@ Downloaded automatically on first run from Project Gutenberg:
 | Moby Dick | PG #2701 |
 | Les Misérables | PG #135 |
 
-All files are concatenated, shuffled line-by-line, and used as a character-level corpus.
+Files are split into paragraphs and trained with a curriculum (see below). All prior
+curriculum stages are pooled into each subsequent stage so the model doesn't
+catastrophically forget earlier material.
 
 ---
 
@@ -180,7 +168,7 @@ Outputs:
 | `n_embd`      | 128     | Token embedding dimension                                 |
 | `bond_dim`    | 32      | TN bond dimension D — capacity per edge                   |
 | `block_size`  | 128     | Context length and TN graph size                          |
-| `lambda_l0`   | 1e-4    | L0 regularisation weight (÷400 applied in loss)           |
+| `lambda_l0`   | 1e-3    | L0 regularisation weight (fraction of active edges)       |
 | `n_layer`     | 1       | Number of transformer blocks                              |
 
 ---
