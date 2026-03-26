@@ -86,18 +86,17 @@ class TNAttention(nn.Module):
             v_t = v @ M[t]                                     # (D,)@(D,D) -> (D,)
 
             # Long-range: i < t-1 only (i = t-1 is the chain, already handled)
-            for i in range(t - 1):
-                z = Z[i, t]
-                if z.item() > 0.0:
-                    v_t = v_t + z * (v_states[i] @ self.B[i, t])  # (D,)
+            # Batched over all i at once: sum_i Z[i,t] * (v_states[i] @ B[i,t])
+            if t >= 2:
+                V_prev = torch.stack(v_states[:-1])            # (t-1, D)
+                v_t = v_t + torch.einsum('i,id,ide->e', Z[:t-1, t], V_prev, self.B[:t-1, t])
 
             v_t = torch.tanh(v_t)
             v_states.append(v_t)
             v = v_t
 
         # --- Step 4: project bond states to output embeddings ---
-        v_stack = torch.stack(v_states)          # (T, D)
-        return self.output_proj(v_stack)          # (T, n_embd)
+        return self.output_proj(torch.stack(v_states))         # (T, n_embd)
 
     def l0_loss(self) -> Tensor:
         """Expected *fraction* of active long-range bonds (chain excluded), in [0, 1].
