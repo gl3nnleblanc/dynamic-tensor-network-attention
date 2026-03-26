@@ -113,7 +113,7 @@ class TNAttention(nn.Module):
 
     def active_edge_count(self) -> int:
         mask = torch.ones(self.block_size, self.block_size).tril(diagonal=-2)
-        return int((expected_l0(self.log_alpha.cpu()) * mask > 0.5).sum().item())
+        return int((torch.sigmoid(self.log_alpha.cpu()) * mask > 0.5).sum().item())
 
     def __repr__(self) -> str:
         return (f"TNAttention(n_embd={self.n_embd}, bond_dim={self.bond_dim}, "
