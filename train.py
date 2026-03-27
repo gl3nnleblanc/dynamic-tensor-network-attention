@@ -6,6 +6,7 @@ ported to PyTorch with the multi-head attention block replaced by TNAttention.
 """
 
 import os
+import re
 import sys
 import math
 import random
@@ -19,6 +20,9 @@ from tn_gpt import TNAttention
 
 random.seed(42)
 torch.manual_seed(42)
+
+device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+print(f"device: {device}")
 
 # ---------------------------------------------------------------------------
 # Dataset
@@ -145,15 +149,16 @@ def load_paragraphs(path, min_len=40):
     paragraphs, current = [], []
     for line in text.splitlines():
         line = line.strip()
+        line = re.sub(r'^\d+:\d+\.?\s*', '', line)   # strip verse/stanza refs (e.g. "3:2. ")
         if line:
             current.append(line)
         elif current:
-            para = ' '.join(current)
+            para = re.sub(r'[ \t]+', ' ', ' '.join(current)).strip()
             if len(para) >= min_len and 'ILLUSTRATION' not in para.upper():
                 paragraphs.append(para)
             current = []
     if current:
-        para = ' '.join(current)
+        para = re.sub(r'[ \t]+', ' ', ' '.join(current)).strip()
         if len(para) >= min_len:
             paragraphs.append(para)
     return paragraphs
@@ -261,7 +266,7 @@ class GPT(nn.Module):
     def forward(self, token_ids: Tensor) -> Tensor:
         # token_ids: (T,) — full sequence
         T = token_ids.shape[0]
-        x = self.wte(token_ids) + self.wpe(torch.arange(T))  # (T, n_embd)
+        x = self.wte(token_ids) + self.wpe(torch.arange(T, device=token_ids.device))  # (T, n_embd)
         x = rmsnorm(x)
         for block in self.blocks:
             x = block(x)
@@ -274,7 +279,7 @@ class GPT(nn.Module):
         return sum(b.attn.active_edge_count() for b in self.blocks)
 
 
-model = GPT()
+model = GPT().to(device)
 # log_alpha parameters learn graph structure, not weights — needs a much higher lr
 # to move meaningfully within a training run. Everything else uses the base lr.
 log_alpha_params = [p for n, p in model.named_parameters() if 'log_alpha' in n]
@@ -307,8 +312,8 @@ def sample(n_samples=3, max_len=120, temperature=0.7):
         for _ in range(n_samples):
             tokens = [BOS]
             for _ in range(max_len):
-                logits = model(torch.tensor(tokens))
-                probs  = F.softmax(logits[-1] / temperature, dim=-1)
+                logits = model(torch.tensor(tokens, device=device))
+                probs  = F.softmax(logits[-1] / temperature, dim=-1).cpu()
                 tok    = torch.multinomial(probs, 1).item()
                 if tok == BOS:
                     break
@@ -396,14 +401,21 @@ def render(gate_mat, level, step, total, task_loss, l0, n_active, mean_la, max_l
 # Training loop
 # ---------------------------------------------------------------------------
 
-# Total step count for LR decay: sum of all level pool sizes * passes_per_level
+# Total step count for LR decay: each stage trains on the full accumulated pool,
+# so later stages repeat earlier docs. Sum accumulated pool sizes × passes.
 passes_per_level = num_epochs
-total_steps = sum(len(v) for v in level_docs.values()) * passes_per_level
+acc, total_steps = 0, 0
+for level in LEVELS:
+    pool = level_docs.get(level, [])
+    if pool:
+        acc += len(pool)
+        total_steps += acc * passes_per_level
 print(f"total training steps: {total_steps}  (capture every {max(1, total_steps // 14900)} steps to stay under 1GB)")
 step = 0
+samples = []
 
 def train_on_pool(pool, level, passes=1):
-    global step
+    global step, samples
     for _ in range(passes):
         epoch_pool = list(pool)
         random.shuffle(epoch_pool)
@@ -413,8 +425,8 @@ def train_on_pool(pool, level, passes=1):
             if T < 2:
                 continue
 
-            inp     = torch.tensor(tokens[:T])
-            targets = torch.tensor(tokens[1:T + 1])
+            inp     = torch.tensor(tokens[:T],     device=device)
+            targets = torch.tensor(tokens[1:T + 1], device=device)
 
             logits    = model(inp)
             task_loss = F.cross_entropy(logits, targets)
@@ -448,13 +460,12 @@ def train_on_pool(pool, level, passes=1):
             n_active = model.active_edge_count()
             mean_la  = sum(b.attn.log_alpha.mean().item() for b in model.blocks) / len(model.blocks)
             max_la   = max(b.attn.log_alpha.max().item()  for b in model.blocks)
-            samples  = sample()
-            render(gate_mat, level, step, total_steps,
-                   task_loss.item(), model.l0_loss().item(), n_active, mean_la, max_la, samples)
-
-            if step % max(1, total_steps // 14900) == 0:
+            if step % 200 == 0 or step == 1:
+                samples = sample()
                 save_timelapse_frame(gate_mat, level, step,
                                      task_loss.item(), model.l0_loss().item(), n_active, samples)
+            render(gate_mat, level, step, total_steps,
+                   task_loss.item(), model.l0_loss().item(), n_active, mean_la, max_la, samples)
 
 
 model.train()

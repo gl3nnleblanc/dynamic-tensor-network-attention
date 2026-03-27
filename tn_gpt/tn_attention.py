@@ -107,8 +107,10 @@ class TNAttention(nn.Module):
         return (expected_l0(self.log_alpha) * mask).sum() / n_potential
 
     def gate_matrix(self) -> Tensor:
-        """Adjacency matrix as gate probabilities. Shape (N, N). For visualization."""
-        return torch.sigmoid(self.log_alpha).detach().cpu()
+        """Adjacency matrix as gate probabilities. Shape (N, N). For visualization.
+        Only long-range edges (tril diagonal=-2) are learned; everything else is zeroed."""
+        mask = torch.ones(self.block_size, self.block_size).tril(diagonal=-2)
+        return (torch.sigmoid(self.log_alpha).detach().cpu() * mask)
 
     def active_edge_count(self) -> int:
         mask = torch.ones(self.block_size, self.block_size).tril(diagonal=-2)
